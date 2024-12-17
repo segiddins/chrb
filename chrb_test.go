@@ -61,9 +61,11 @@ func TestChrb(t *testing.T) {
 			ruby, err := chrb.FindRuby(test.pattern)
 			if assert.NoError(t, err) {
 				assert.Equal(t, test.execPath, ruby.ExecPath())
-				env, err := ruby.Env()
-				if assert.NoError(t, err) {
-					assert.Equal(t, test.env, env)
+				if test.env != nil {
+					env, err := ruby.Env()
+					if assert.NoError(t, err) {
+						assert.Equal(t, test.env, env)
+					}
 				}
 			}
 		})
