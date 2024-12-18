@@ -7,7 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/spf13/afero"
@@ -16,12 +16,52 @@ import (
 var Fs = afero.NewOsFs()
 
 type Ruby struct {
-	Engine  string
-	Version string
-	RubyDir
+	Engine  string `json:"engine"`
+	Version string `json:"version"`
+	RubyDir `json:"ruby_dir"`
 }
 
-var engines = []string{"ruby", "jruby", "mruby", "truffleruby-jvm", "truffleruby-native", "truffleruby"}
+type Options struct {
+	KnownEngines         []string `json:"known_engines"`
+	DirectoryEnvPatterns []string `json:"directory_env_patterns"`
+	GemHomeEnvPattern    string   `json:"gem_home_env_pattern"`
+}
+
+var DefaultOptions = Options{
+	KnownEngines:         []string{"ruby", "jruby", "mruby", "truffleruby-jvm", "truffleruby-native", "truffleruby"},
+	DirectoryEnvPatterns: []string{"$PREFIX/opt/rubies", "$HOME/.rubies"},
+	// TODO: allow using RUBY_API_VERSION instead of RUBY_VERSION
+	GemHomeEnvPattern: "$HOME/.gem/$RUBY_ENGINE/$RUBY_VERSION",
+}
+
+func (o *Options) Clone() *Options {
+	return &Options{
+		KnownEngines:         slices.Clone(o.KnownEngines),
+		DirectoryEnvPatterns: slices.Clone(o.DirectoryEnvPatterns),
+		GemHomeEnvPattern:    strings.Clone(o.GemHomeEnvPattern),
+	}
+}
+
+func (o *Options) Merge(other *Options) {
+	if len(other.KnownEngines) > 0 {
+		o.KnownEngines = other.KnownEngines
+	}
+	if len(other.DirectoryEnvPatterns) > 0 {
+		o.DirectoryEnvPatterns = other.DirectoryEnvPatterns
+	}
+	if len(other.GemHomeEnvPattern) > 0 {
+		o.GemHomeEnvPattern = other.GemHomeEnvPattern
+	}
+}
+
+type RubyEnvFinder func(r *Ruby) ([]string, error)
+type Config struct {
+	Options       *Options
+	Uid           int
+	Fs            afero.Fs
+	Env           *Env
+	RubyEnvFinder RubyEnvFinder
+}
 
 type RubyDir string
 
@@ -29,16 +69,16 @@ func (rubyDir RubyDir) ExecPath() string {
 	return filepath.Join(string(rubyDir), "bin", "ruby")
 }
 
-func RubyFromDir(dir RubyDir) (Ruby, error) {
+func RubyFromDir(config *Config, dir RubyDir) (Ruby, error) {
 	rubyDir := string(dir)
-	_, err := Fs.Stat(rubyDir)
+	_, err := config.Fs.Stat(rubyDir)
 	if err != nil {
 		return Ruby{}, err
 	}
 	basename := filepath.Base(rubyDir)
 	parts := strings.Split(basename, "-")
 	engine := "ruby"
-	for _, e := range engines {
+	for _, e := range config.Options.KnownEngines {
 		if parts[0] == e {
 			engine = e
 			parts = parts[1:]
@@ -61,11 +101,10 @@ func RubyFromDir(dir RubyDir) (Ruby, error) {
 	}, nil
 }
 
-func ListRubies() (rubies []Ruby, err error) {
-	prefix := os.Getenv("PREFIX")
-	home := os.Getenv("HOME")
-	for _, dir := range []string{fmt.Sprintf("%s/opt/rubies", prefix), fmt.Sprintf("%s/.rubies", home)} {
-		entries, err := afero.ReadDir(Fs, dir)
+func ListRubies(config *Config) (rubies []Ruby, err error) {
+	for _, dir := range config.Options.DirectoryEnvPatterns {
+		dir = config.Env.ExpandEnv(dir)
+		entries, err := afero.ReadDir(config.Fs, dir)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -73,14 +112,14 @@ func ListRubies() (rubies []Ruby, err error) {
 			return nil, err
 		}
 		for _, entry := range entries {
-			stat, err := Fs.Stat(filepath.Join(dir, entry.Name()))
+			stat, err := config.Fs.Stat(filepath.Join(dir, entry.Name()))
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error getting stat for %s: %s\n", entry.Name(), err)
 				continue
 			}
 			if stat.IsDir() {
 				rubyDir := RubyDir(filepath.Join(dir, entry.Name()))
-				ruby, err := RubyFromDir(rubyDir)
+				ruby, err := RubyFromDir(config, rubyDir)
 				if err != nil {
 					return nil, err
 				}
@@ -88,11 +127,19 @@ func ListRubies() (rubies []Ruby, err error) {
 			}
 		}
 	}
-	return
+
+	slices.SortFunc(rubies, func(a, b Ruby) int {
+		e := strings.Compare(a.Engine, b.Engine)
+		if e != 0 {
+			return e
+		}
+		return strings.Compare(a.Version, b.Version)
+	})
+	return rubies, nil
 }
 
-func FindRuby(pattern string) (Ruby, error) {
-	rubies, err := ListRubies()
+func FindRuby(pattern string, config *Config) (Ruby, error) {
+	rubies, err := ListRubies(config)
 	if err != nil {
 		return Ruby{}, err
 	}
@@ -102,15 +149,9 @@ func FindRuby(pattern string) (Ruby, error) {
 		rubiesByEngine[ruby.Engine] = append(rubiesByEngine[ruby.Engine], ruby)
 	}
 
-	for _, rubies := range rubiesByEngine {
-		sort.Slice(rubies, func(i, j int) bool {
-			return rubies[i].Version < rubies[j].Version
-		})
-	}
-
 	var engine, version string
 
-	for _, e := range engines {
+	for _, e := range config.Options.KnownEngines {
 		if strings.HasPrefix(pattern, e+"-") {
 			engine = e
 			version = strings.TrimPrefix(pattern, e+"-")
@@ -132,18 +173,19 @@ func FindRuby(pattern string) (Ruby, error) {
 		return Ruby{}, fmt.Errorf("no rubies found for engine: %s", engine)
 	}
 
+	if len(version) == 0 {
+		return versions[len(versions)-1], nil
+	}
+
 	for _, ruby := range versions {
 		if ruby.Version == version {
 			return ruby, nil
 		}
 	}
 
-	if len(version) == 0 {
-		return versions[len(versions)-1], nil
-	}
-
-	for _, ruby := range versions {
-		if strings.HasPrefix(ruby.Version, version) {
+	searchVersion := strings.TrimSuffix(version, ".") + "."
+	for _, ruby := range slices.Backward(versions) {
+		if strings.HasPrefix(ruby.Version, searchVersion) {
 			return ruby, nil
 		}
 	}
@@ -151,13 +193,14 @@ func FindRuby(pattern string) (Ruby, error) {
 	return Ruby{}, fmt.Errorf("no ruby found for pattern: %s", pattern)
 }
 
-func (r *Ruby) findEnv() ([]string, error) {
+func ExecFindEnv(r *Ruby) ([]string, error) {
 	cmd := exec.Command(r.ExecPath(), "-rrubygems", "-e", `
 		puts "RUBY_ENGINE=#{Object.const_defined?(:RUBY_ENGINE) ? RUBY_ENGINE : 'ruby'}"
 		print "\0"
 		puts "RUBY_VERSION=#{RUBY_VERSION}"
 		print "\0"
 		begin; require 'rubygems'; puts "GEM_ROOT=#{Gem.default_dir}"; print "\0" rescue LoadError; end
+		begin; require 'rubygems'; puts "RUBY_API_VERSION=#{Gem.ruby_api_version}"; print "\0" rescue LoadError; end
 	`)
 	cmd.Env = append([]string{}, "RUBYGEMS_GEMDEPS=")
 	cmd.Stderr = nil
@@ -171,9 +214,10 @@ func (r *Ruby) findEnv() ([]string, error) {
 	return env, nil
 }
 
-func (r *Ruby) Env() ([]string, error) {
+func (r *Ruby) Env(config *Config) (*Env, error) {
+	env := config.Env.Clone()
 	execPath := r.ExecPath()
-	stat, err := Fs.Stat(execPath)
+	stat, err := config.Fs.Stat(execPath)
 	if err != nil {
 		return nil, err
 	}
@@ -181,44 +225,66 @@ func (r *Ruby) Env() ([]string, error) {
 		return nil, fmt.Errorf("ruby executable is not executable: %s %o", execPath, stat.Mode())
 	}
 
-	path := os.Getenv("PATH")
-	path = fmt.Sprintf("%s:%s", r.RubyDir+"/bin", path)
-	env, err := r.findEnv()
+	foundEnv, err := config.RubyEnvFinder(r)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to find env for ruby at %s: %w", r.ExecPath(), err)
 	}
-	var gemRoot, rubyEngine, rubyVersion, gemPath, gemHome string
-	for _, e := range env {
-		if strings.HasPrefix(e, "GEM_ROOT=") {
-			gemRoot = strings.TrimPrefix(e, "GEM_ROOT=")
-		}
-		if strings.HasPrefix(e, "RUBY_ENGINE=") {
-			rubyEngine = strings.TrimPrefix(e, "RUBY_ENGINE=")
-		}
-		if strings.HasPrefix(e, "RUBY_VERSION=") {
-			rubyVersion = strings.TrimPrefix(e, "RUBY_VERSION=")
-		}
-	}
-	if len(gemRoot) > 0 {
-		path = fmt.Sprintf("%s:%s", gemRoot+"/bin", path)
+	env = env.Merge(foundEnv)
+
+	path := env.Getenv("PATH")
+	if len(path) > 0 {
+		path = strings.Join([]string{string(r.RubyDir) + "/bin", path}, string(filepath.ListSeparator))
+	} else {
+		path = string(r.RubyDir) + "/bin"
 	}
 
 	if os.Getuid() != 0 {
-		home := os.Getenv("HOME")
-		gemHome = fmt.Sprintf("%s/.gem/%s/%s", home, rubyEngine, rubyVersion)
-		gemPath = gemHome
+		gemHome := env.ExpandEnv(DefaultOptions.GemHomeEnvPattern)
+		gemPath := gemHome
+		gemRoot := env.Getenv("GEM_ROOT")
 		if len(gemRoot) > 0 {
-			gemPath = fmt.Sprintf("%s:%s", gemHome, gemRoot)
+			gemPath = strings.Join([]string{gemHome, gemRoot}, string(filepath.ListSeparator))
 		}
-		// if envGemPath := os.Getenv("GEM_PATH"); len(envGemPath) > 0 {
-		// 	gemPath = fmt.Sprintf("%s:%s", gemHome, envGemPath)
-		// }
+		env.GemHome = &gemHome
+		env.GemPath = &gemPath
+		env.GemRoot = &gemRoot
 	}
 
-	return append([]string{
-		fmt.Sprintf("RUBY_ROOT=%s", r.RubyDir),
-		fmt.Sprintf("GEM_HOME=%s", gemHome),
-		fmt.Sprintf("GEM_PATH=%s", gemPath),
-		fmt.Sprintf("PATH=%s", path),
-	}, env...), nil
+	rubyRoot := string(r.RubyDir)
+	env.RubyRoot = &rubyRoot
+	env.Path = &path
+
+	return env, nil
+}
+
+func FindRubyVersion(config *Config, dir string) (string, error) {
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	for {
+		isDir, err := afero.DirExists(config.Fs, dir)
+		if err != nil {
+			return "", err
+		}
+		if !isDir {
+			return "", fmt.Errorf("%s is not a directory", dir)
+		}
+
+		content, err := afero.ReadFile(config.Fs, filepath.Join(dir, ".ruby-version"))
+		if err != nil && !os.IsNotExist(err) {
+			return "", err
+		}
+		if err == nil {
+			return strings.TrimSpace(string(content)), nil
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+
+	return "", fmt.Errorf("no ruby version file found")
 }

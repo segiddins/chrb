@@ -1,53 +1,26 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"syscall"
 
 	"github.com/segiddins/chrb"
+	"github.com/spf13/afero"
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: chrb <version>")
-		os.Exit(1)
+	config := chrb.Config{
+		Env:           chrb.ParseEnv(os.Environ()),
+		Options:       chrb.DefaultOptions.Clone(),
+		Uid:           os.Getuid(),
+		Fs:            afero.NewOsFs(),
+		RubyEnvFinder: chrb.ExecFindEnv,
 	}
-	if os.Args[1] == "--list" {
-		rubies, err := chrb.ListRubies()
-		if err != nil {
-			fmt.Println("Error listing rubies:", err)
-			os.Exit(1)
-		}
-		for _, ruby := range rubies {
-			fmt.Println(ruby)
-		}
-		return
-	}
+	app := chrb.App(&config)
 
-	ruby, err := chrb.FindRuby(os.Args[1])
-	if err != nil {
-		fmt.Println("Error finding ruby:", err)
-		os.Exit(1)
-	}
-	// fmt.Println(ruby)
-	env, err := ruby.Env()
-	if err != nil {
-		fmt.Println("Error getting environment for ruby:", err)
-		os.Exit(1)
-	}
-	// for _, e := range env {
-	// 	fmt.Println(e)
-	// }
-
-	fmt.Println(ruby.ExecPath())
-	fmt.Println(env)
-
-	args := []string{"ruby"}
-	args = append(args, os.Args[2:]...)
-	err = syscall.Exec(ruby.ExecPath(), args, append(os.Environ(), env...))
-	if err != nil {
-		fmt.Println("Error executing ruby:", err)
+	if err := app.Run(context.Background(), os.Args); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 }
