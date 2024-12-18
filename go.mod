@@ -2,16 +2,9 @@ module github.com/segiddins/chrb
 
 go 1.23.1
 
-require (
-	github.com/spf13/afero v1.11.0
-	github.com/urfave/cli v1.22.16
-)
+require github.com/spf13/afero v1.11.0
 
-require (
-	github.com/BurntSushi/toml v1.4.0 // indirect
-	github.com/urfave/cli-docs/v3 v3.0.0-alpha6 // indirect
-	github.com/xrash/smetrics v0.0.0-20240521201337-686a1a2994c1 // indirect
-)
+require github.com/urfave/cli-docs/v3 v3.0.0-alpha6
 
 require (
 	github.com/cpuguy83/go-md2man/v2 v2.0.5 // indirect
@@ -26,7 +19,6 @@ require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/stretchr/testify v1.10.0
-	github.com/urfave/cli/v2 v2.27.5
 	github.com/urfave/cli/v3 v3.0.0-beta1
 	golang.org/x/text v0.21.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

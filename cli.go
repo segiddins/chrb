@@ -28,8 +28,9 @@ func GetConfig(ctx context.Context) *Config {
 
 func App(config *Config) *cli.Command {
 	return &cli.Command{
-		Name:  "chrb",
-		Usage: "run ruby commands",
+		Name:           "chrb",
+		Usage:          "run ruby commands",
+		DefaultCommand: "list-or-use",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:  "default-ruby-version",
@@ -55,6 +56,26 @@ func App(config *Config) *cli.Command {
 					},
 				},
 				Action: listRubies,
+			},
+			{
+				Name:      "list-or-use",
+				Usage:     "list or use a ruby",
+				ArgsUsage: "[ruby]",
+				Hidden:    true,
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					fmt.Fprintf(cmd.Writer, "%#v\n", cmd.Root().Args())
+					if cmd.Root().NArg() == 0 {
+						return listRubies(ctx, cmd)
+					}
+					return useRuby(ctx, cmd.Root())
+				},
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "format",
+						Value: "text",
+						Usage: "text|json",
+					},
+				},
 			},
 			{
 				Name:      "use",
@@ -112,7 +133,7 @@ func listRubies(ctx context.Context, cmd *cli.Command) error {
 
 	switch format := cmd.String("format"); format {
 	case "json":
-		json.NewEncoder(os.Stdout).Encode(rubies)
+		return json.NewEncoder(cmd.Writer).Encode(rubies)
 	case "text":
 		for _, ruby := range rubies {
 			activeString := " "
