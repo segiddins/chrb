@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-multierror"
+	"github.com/jedib0t/go-pretty/v6/progress"
 	"github.com/urfave/cli/v3"
 	"golang.org/x/term"
 )
@@ -221,6 +222,13 @@ type runResult struct {
 	err     error
 }
 
+func (r *runResult) String() string {
+	if r.time > 0 {
+		return fmt.Sprintf("%s (%s %s) -> %s in %s", r.pattern, r.ruby.Engine, r.ruby.Version, r.exit, r.time.Round(time.Millisecond))
+	}
+	return fmt.Sprintf("%s (%s %s)", r.pattern, r.ruby.Engine, r.ruby.Version)
+}
+
 func execMatrix(ctx context.Context, cmd *cli.Command) error {
 	rubies := cmd.StringSlice("ruby")
 
@@ -263,6 +271,22 @@ func execMatrix(ctx context.Context, cmd *cli.Command) error {
 		}
 	}()
 
+	pw := progress.NewWriter()
+	pw.SetAutoStop(true)
+	pw.SetOutputWriter(cmd.Writer)
+	pw.SetNumTrackersExpected(len(rubies))
+	style := progress.StyleDefault
+	style.Visibility.TrackerOverall = false
+	style.Visibility.ETA = false
+	style.Visibility.ETAOverall = false
+	style.Visibility.Percentage = false
+	style.Visibility.Value = false
+	style.Options.TimeDonePrecision = time.Millisecond
+	pw.SetStyle(style)
+	go func() {
+		pw.Render()
+	}()
+
 	results := make(chan runResult)
 
 	arg := *cmd.Arguments[1].(*cli.StringArg).Values
@@ -274,10 +298,25 @@ func execMatrix(ctx context.Context, cmd *cli.Command) error {
 
 	for i, env := range envs {
 		pattern := rubies[i]
+		tracker := &progress.Tracker{
+			Message: pattern,
+			Total:   0,
+		}
+		pw.AppendTracker(tracker)
 		go func(env struct {
 			env  []string
 			ruby *Ruby
 		}) {
+			result := &runResult{pattern: pattern, ruby: env.ruby}
+			tracker.UpdateMessage(result.String())
+			defer func() {
+				tracker.UpdateMessage(result.String())
+				if result.err != nil {
+					tracker.MarkAsErrored()
+				} else {
+					tracker.MarkAsDone()
+				}
+			}()
 			cmd := exec.CommandContext(ctx, "env", arg...)
 			cmd.Env = env.env
 			stdout := bytes.NewBuffer(nil)
@@ -288,7 +327,11 @@ func execMatrix(ctx context.Context, cmd *cli.Command) error {
 			err := cmd.Run()
 			duration := time.Since(start)
 
-			results <- runResult{pattern, env.ruby, stdout.String(), cmd.ProcessState.String(), duration, err}
+			result.stdout = stdout.String()
+			result.exit = cmd.ProcessState.String()
+			result.time = duration
+			result.err = err
+			results <- *result
 		}(env)
 	}
 
@@ -319,7 +362,7 @@ func execMatrix(ctx context.Context, cmd *cli.Command) error {
 			fmt.Fprintln(cmd.Writer)
 		}
 		fmt.Fprintln(cmd.Writer, header)
-		label := fmt.Sprintf(" %s (%s %s) -> %s in %s ", result.pattern, result.ruby.Engine, result.ruby.Version, result.exit, result.time)
+		label := result.String()
 		label = strings.Repeat("-", (width-len(label))/2) + label + strings.Repeat("-", (width-len(label))/2)
 		fmt.Fprintln(cmd.Writer, label)
 		cmd.Writer.Write([]byte(result.stdout))
